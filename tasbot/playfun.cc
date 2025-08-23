@@ -1846,7 +1846,8 @@ struct PlayFun {
       // avoid the initial replay. If they happen to go back to the
       // same helper that computed it in the first place, it'd be
       // cached, at least.
-      TakeBestAmong(tryvec, trysplanations, futures, false);
+  double tmp_best = 0.0;
+  TakeBestAmong(tryvec, trysplanations, futures, false, &tmp_best);
 
       fprintf(stderr, "Write replacement movie.\n");
       SimpleFM2::WriteInputsWithSubtitles(

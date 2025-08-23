@@ -8,6 +8,8 @@
 #include <sstream>
 #include <utility>
 #include <vector>
+#include <cmath>
+#include <math.h>
 
 #include "tasbot.h"
 #include "../cc-lib/arcfour.h"
@@ -39,10 +41,10 @@ struct WeightedObjectives::Info {
   vector<uint8> is_decreasing;   // 1 if decreasing is good
 
   // Sorted, using transformed keys (MapKey) lex-ascending.
-  double is_sorted;  
-  vector< vector<uint8> > observations;
+  mutable bool is_sorted;  
+  mutable vector< vector<uint8> > observations;
 
-  const vector< vector<uint8> > &GetObservations() {
+  const vector< vector<uint8> > &GetObservations() const {
     if (!is_sorted) {
       std::sort(observations.begin(), observations.end());
       // Observation thinning: keep only unique transformed keys.
@@ -95,11 +97,20 @@ WeightedObjectives::LoadFromFile(const string &filename) {
       ss >> d;
       vector<int> locs;
       while (!ss.eof()) {
-	int i;
-	ss >> i;
-	locs.push_back(i);
+        int i;
+        ss >> i;
+        if (!ss.fail()) locs.push_back(i);
       }
-      wo->weighted.insert(make_pair(locs, new Info(d)));
+      Info *info = new Info(d);
+      info->indices.reserve(locs.size());
+      info->is_signed.reserve(locs.size());
+      info->is_decreasing.reserve(locs.size());
+      for (int j = 0; j < (int)locs.size(); j++) {
+        info->indices.push_back(ObjIndexFromToken(locs[j]));
+        info->is_signed.push_back(ObjSignedFromToken(locs[j]) ? 1 : 0);
+        info->is_decreasing.push_back(ObjDecreasingFromToken(locs[j]) ? 1 : 0);
+      }
+      wo->weighted.insert(make_pair(locs, info));
     }
   }
 
@@ -175,41 +186,24 @@ void WeightedObjectives::Observe(const vector<uint8> &memory) {
   }
 }
 
-static bool LessObjectiveTransformed(const vector<uint8> &mem1,
-                                    const vector<uint8> &mem2,
-                                    const WeightedObjectives::Info *info) {
-  for (int i = 0; i < info->indices.size(); i++) {
-    uint8 a = MapKey(mem1[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
-    uint8 b = MapKey(mem2[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
-    if (a > b) return false;
-    if (a < b) return true;
-  }
-  return false;
-}
-
-// Order 1 means mem1 < mem2, -1 means mem1 > mem2, 0 means equal.
-// (note this is backwards from strcmp. Think of if like a multiplier
-// for the weight.)
-static int OrderTransformed(const vector<uint8> &mem1,
-                           const vector<uint8> &mem2,
-                           const WeightedObjectives::Info *info) {
-  for (int i = 0; i < info->indices.size(); i++) {
-    uint8 a = MapKey(mem1[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
-    uint8 b = MapKey(mem2[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
-    if (a > b) return -1;
-    if (a < b) return 1;
-  }
-  return 0;
-}
+// Removed free helpers that referenced private Info; comparisons are inlined below.
 
 double WeightedObjectives::WeightedLess(const vector<uint8> &mem1,
 					const vector<uint8> &mem2) const {
   double score = 0.0;
   for (Weighted::const_iterator it = weighted.begin();
        it != weighted.end(); ++it) {
-    const double weight = it->second->weight;
-    if (LessObjectiveTransformed(mem1, mem2, it->second))
-      score += weight;
+    const Info *info = it->second;
+    const double weight = info->weight;
+    bool less = false;
+    bool decided = false;
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      uint8 a = MapKey(mem1[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
+      uint8 b = MapKey(mem2[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
+      if (a < b) { less = true; decided = true; break; }
+      if (a > b) { less = false; decided = true; break; }
+    }
+    if (decided && less) score += weight;
   }
   CHECK(score >= 0);
   return score;
@@ -220,31 +214,25 @@ double WeightedObjectives::Evaluate(const vector<uint8> &mem1,
   double score = 0.0;
   for (Weighted::const_iterator it = weighted.begin();
        it != weighted.end(); ++it) {
-    const double weight = it->second->weight;
-    switch (OrderTransformed(mem1, mem2, it->second)) {
-    case -1: score -= weight; break;
-    case 1: score += weight; break;
-    case 0:
-    default:;
+    const Info *info = it->second;
+    const double weight = info->weight;
+    int order = 0;
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      uint8 a = MapKey(mem1[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
+      uint8 b = MapKey(mem2[info->indices[i]], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
+      if (a < b) { order = 1; break; }
+      if (a > b) { order = -1; break; }
     }
+    if (order == 1) score += weight; else if (order == -1) score -= weight;
   }
   return score;
 }
 
-// Helper to get normalized rank fraction for a memory over an objective.
-static double RankFrac(const WeightedObjectives::Info *info,
-                       const vector<uint8> &mem,
-                       const vector<int> &objective_unused) {
-  vector<uint8> cur;
-  cur.reserve(info->indices.size());
-  for (int i = 0; i < info->indices.size(); i++) {
-    int idx = info->indices[i];
-    cur.push_back(MapKey(mem[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
-  }
-  // Use observations that may be lazily sorted.
-  const vector< vector<uint8> > &obs = info->GetObservations();
+// Helper: inline f = rank fraction for a transformed key vector
+static inline double RankFracInline(const vector< vector<uint8> > &obs,
+                                    const vector<uint8> &key) {
   if (obs.empty()) return 0.0;
-  int idx = lower_bound(obs.begin(), obs.end(), cur) - obs.begin();
+  int idx = lower_bound(obs.begin(), obs.end(), key) - obs.begin();
   double frac = (double)idx / (double)obs.size();
   if (frac < 0.0) frac = 0.0; if (frac > 1.0) frac = 1.0;
   return frac;
@@ -256,8 +244,16 @@ double WeightedObjectives::EvaluateMagnitude(const vector<uint8> &mem1,
   for (Weighted::const_iterator it = weighted.begin(); it != weighted.end(); ++it) {
     const Info *info = it->second;
     const double weight = info->weight;
-    double f1 = RankFrac(info, mem1, info->indices);
-    double f2 = RankFrac(info, mem2, info->indices);
+    vector<uint8> k1; k1.reserve(info->indices.size());
+    vector<uint8> k2; k2.reserve(info->indices.size());
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      int idx = info->indices[i];
+      k1.push_back(MapKey(mem1[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+      k2.push_back(MapKey(mem2[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+    }
+    const vector< vector<uint8> > &obs = info->GetObservations();
+    double f1 = RankFracInline(obs, k1);
+    double f2 = RankFracInline(obs, k2);
     score += weight * (f2 - f1);
   }
   return score;
@@ -271,8 +267,16 @@ void WeightedObjectives::DeltaMagnitude(const vector<uint8> &mem1,
   for (Weighted::const_iterator it = weighted.begin(); it != weighted.end(); ++it) {
     const Info *info = it->second;
     const double weight = info->weight;
-    double f1 = RankFrac(info, mem1, info->indices);
-    double f2 = RankFrac(info, mem2, info->indices);
+    vector<uint8> k1; k1.reserve(info->indices.size());
+    vector<uint8> k2; k2.reserve(info->indices.size());
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      int idx = info->indices[i];
+      k1.push_back(MapKey(mem1[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+      k2.push_back(MapKey(mem2[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+    }
+    const vector< vector<uint8> > &obs = info->GetObservations();
+    double f1 = RankFracInline(obs, k1);
+    double f2 = RankFracInline(obs, k2);
     double d = weight * (f2 - f1);
     if (d >= 0) pos += d; else neg += d;
   }
@@ -301,26 +305,7 @@ double WeightedObjectives::BuggyEvaluate(const vector<uint8> &mem1,
 }
 #endif
 
-// Build transformed key vector for memory using info flags.
-static vector<uint8> GetValuesX(const vector<uint8> &mem,
-                                const WeightedObjectives::Info *info) {
-  vector<uint8> out;
-  out.resize(info->indices.size());
-  for (int i = 0; i < info->indices.size(); i++) {
-    int idx = info->indices[i];
-    out[i] = MapKey(mem[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0);
-  }
-  return out;
-}
-
-static vector< vector<uint8> >
-GetUniqueValuesX(const vector< vector<uint8 > > &memories,
-                 const WeightedObjectives::Info *info) {
-  set< vector<uint8> > values;
-  for (int i = 0; i < memories.size(); i++) values.insert(GetValuesX(memories[i], info));
-  vector< vector<uint8> > uvalues(values.begin(), values.end());
-  return uvalues;
-}
+// Removed GetValuesX/GetUniqueValuesX; call sites inline transforms.
 
 // Find the index of the vector now within the values
 // array, which is sorted and unique.
@@ -342,7 +327,11 @@ double WeightedObjectives::GetNormalizedValue(const vector<uint8> &mem) {
 
   for (Weighted::iterator it = weighted.begin(); it != weighted.end(); ++it) {
     Info *info = &*it->second;
-    vector<uint8> cur = GetValuesX(mem, info);
+    vector<uint8> cur; cur.reserve(info->indices.size());
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      int idx = info->indices[i];
+      cur.push_back(MapKey(mem[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+    }
     sum += GetValueFrac(info->GetObservations(), cur);
   }
 
@@ -355,7 +344,11 @@ GetNormalizedValues(const vector<uint8> &mem) {
   vector<double> out;
   for (Weighted::iterator it = weighted.begin(); it != weighted.end(); ++it) {
     Info *info = &*it->second;
-    vector<uint8> cur = GetValuesX(mem, info);
+    vector<uint8> cur; cur.reserve(info->indices.size());
+    for (int i = 0; i < (int)info->indices.size(); i++) {
+      int idx = info->indices[i];
+      cur.push_back(MapKey(mem[idx], info->is_signed[i] != 0, info->is_decreasing[i] != 0));
+    }
     out.push_back(GetValueFrac(info->GetObservations(), cur));
   }
 
@@ -429,7 +422,7 @@ void WeightedObjectives::WeightByExamples(const vector< vector<uint8> >
       for (int si = 0; si < 2; si++) for (int di = 0; di < 2; di++) {
         bool s = (si != 0), d = (di != 0);
         double v = compute_scalar_delta(idx, s, d);
-        if (k == 0 || fabs(v) > fabs(bestv)) { bestv = v; bests = s; bestd = d; }
+  if (k == 0 || fabs(v) > fabs(bestv)) { bestv = v; bests = s; bestd = d; }
       }
       parts.push_back({idx, bests, bestd});
     }
@@ -447,7 +440,7 @@ void WeightedObjectives::WeightByExamples(const vector< vector<uint8> >
       if (grp.empty()) return;
       // Compute group weight (absolute delta) and construct Info and key.
       double delta = group_weight_delta(grp, s, d);
-      double w = fabs(delta);
+  double w = fabs(delta);
       // Heuristic: penalize trivial/constant groups. If there is only one
       // unique transformed value across memories, or weight ~ 0, skip.
       set< vector<uint8> > uniq;
@@ -497,7 +490,14 @@ void WeightedObjectives::SaveSVG(const vector< vector<uint8> > &memories,
        howmany-- && it != weighted.end(); ++it) {
     const Info *info = it->second;
     // All the distinct values this objective takes on, in order (transformed).
-    vector< vector<uint8> > values = GetUniqueValuesX(memories, info);
+    set< vector<uint8> > values_set;
+    for (int i = 0; i < (int)memories.size(); i++) {
+      vector<uint8> key; key.reserve(info->indices.size());
+      for (int j = 0; j < (int)info->indices.size(); j++)
+        key.push_back(MapKey(memories[i][info->indices[j]], info->is_signed[j] != 0, info->is_decreasing[j] != 0));
+      values_set.insert(key);
+    }
+    vector< vector<uint8> > values(values_set.begin(), values_set.end());
     // printf("%lld distinct values for %s\n", values.size(),
     // ObjectiveToString(obj).c_str());
 
@@ -521,13 +521,17 @@ void WeightedObjectives::SaveSVG(const vector< vector<uint8> > &memories,
     // Fill in points as space separated x,y coords
     int lastvalueindex = -1;
     for (int i = 0; i < memories.size(); i++) {
-      vector<uint8> now = GetValuesX(memories[i], info);
+      vector<uint8> now; now.reserve(info->indices.size());
+      for (int j = 0; j < (int)info->indices.size(); j++)
+        now.push_back(MapKey(memories[i][info->indices[j]], info->is_signed[j] != 0, info->is_decreasing[j] != 0));
       int valueindex = GetValueIndex(values, now);
 
       // Allow drawing horizontal lines without interstitial points.
       if (valueindex == lastvalueindex) {
 	while (i < memories.size() - 1) {
-    vector<uint8> next = GetValuesX(memories[i + 1], info);
+    vector<uint8> next; next.reserve(info->indices.size());
+    for (int j = 0; j < (int)info->indices.size(); j++)
+      next.push_back(MapKey(memories[i + 1][info->indices[j]], info->is_signed[j] != 0, info->is_decreasing[j] != 0));
 	  int nextvalueindex = GetValueIndex(values, next);
 	  if (nextvalueindex != valueindex)
 	    break;
