@@ -40,6 +40,18 @@ struct WeightedObjectives {
   double Evaluate(const vector<uint8> &mem1,
                   const vector<uint8> &mem2) const;
 
+  // Magnitude-based scoring using observed distributions:
+  // returns the signed weighted change in objective values.
+  double EvaluateMagnitude(const vector<uint8> &mem1,
+                           const vector<uint8> &mem2) const;
+
+  // Split magnitude-based change into positive and negative components
+  // (already weighted). Useful for separate bookkeeping.
+  void DeltaMagnitude(const vector<uint8> &mem1,
+                      const vector<uint8> &mem2,
+                      double *pos_out,
+                      double *neg_out) const;
+
   // Observe a game state. This informs us about the values that
   // the objective functions can take on, which lets us score the
   // magnitude of their changes. Not necessary for GetNumLess() or

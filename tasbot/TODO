@@ -19,17 +19,22 @@ PPU code,
 
 Don't bother trying every next. Pick the best half, and some random
 subset of the rest. Use the time instead to explore more futures.
+  [DONE] Implemented MIN_NEXTS/MAX_NEXTS with futures-biased subsampling.
 
 At search time, weight changes in objective functions by the magnitude
 of the change, not just the number that went up or down.
+  [DONE] Magnitude-only scoring (EvaluateMagnitude/DeltaMagnitude) in playfun.
 
 Search by an iterated random process, where we look at all the first
 steps, some of the second, fewer of the third, etc.
 
 Integrate over the values of intermediate steps when evaluating a plan.
+  [DONE] ScoreIntegral accumulates EvaluateMagnitude over steps.
+  [DONE] Learnfun weights use integral over steps, normalized by path length.
 
 If we are stuck issuing a very low value move, jump back in time and
 randomize.
+  [DONE] Stuck detection tied to TRY_BACKTRACK_EVERY/2 triggers early backtrack.
 
 Instead of motifs of fixed length, try sequences of random varying length.
 
@@ -37,8 +42,9 @@ Consider making a simple markov model of inputs rather than fixed motifs.
 
 Allow lex ordering to include -byte in addition to +byte, for things
 that decrease.
-
 Allow lex orderings that treat their bytes as signed?
+  [DONE] Objectives carry signed/decreasing flags; Learnfun splits per-part
+        sub-objectives and emits flagged tokens; runtime uses flags.
 
 We should consider explicitly taking into account the tree of inputs,
 since caching makes some kinds of exploration much cheaper than others.
@@ -46,6 +52,13 @@ since caching makes some kinds of exploration much cheaper than others.
 
 when futures are bad in general, shorten them and have more of them.
 When they are good, lengthen them and have fewer.
+  [DONE] Dynamic nfutures_ (±5%) and per-future desired_length (±10%).
+
+New ideas:
+- Configurability: Expose NEXTS/FUTURES bounds in config.txt.
+- Diagnostics: CSV logging of nfutures_, avg desired_length, frac_pos, scores.
+- Observation control: Cap observations per objective (reservoir sampling).
+- Performance: Consider parallelizing futures loop as well; SIMD on rank lookups.
 
 
 can use number of successful (better) backtracks as a way of gauging how

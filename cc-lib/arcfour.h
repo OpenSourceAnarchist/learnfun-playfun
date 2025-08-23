@@ -30,6 +30,11 @@ struct ArcFour {
   // 2001 attach by Fluhrer, Mantin, and Shamir.
   void Discard(int n);
 
+  // Snapshot/restore internal state for reproducible resumes.
+  // The state vector will contain ii, jj, followed by the 256-byte S-box.
+  void GetState(std::vector<uint8> *state) const;
+  bool SetState(const std::vector<uint8> &state);
+
 private:
   uint8 ii, jj;
   uint8 ss[256];

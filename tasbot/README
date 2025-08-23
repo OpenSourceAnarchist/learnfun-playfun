@@ -126,3 +126,13 @@
  pinviz   - Creates a graphic showing the distribution of the ball
             in the three screens from the NES game Pinball. This was
             a write and run once kind of thing.
+
+New in this fork:
+
+- playfun now saves a compact snapshot of its state on every checkpoint
+  to a file named "<game>.pfstate" (same directory as config.txt). If this
+  file exists at startup, playfun will resume from it automatically instead
+  of re-warming from the training movie. The snapshot includes the movie so
+  far, subtitles, periodic RAM observations (for objective normalization),
+  the latest emulator savestate, motif weights, and the PRNG state for
+  reproducibility. Delete the .pfstate file to start fresh.

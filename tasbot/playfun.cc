@@ -10,6 +10,7 @@
 #include <string>
 #include <set>
 #include <cmath>
+#include <stdint.h>
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -18,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <ctype.h>
 
 #include "tasbot.h"
 
@@ -164,7 +166,7 @@ static void SaveFuturesHTML(const vector<Future> &futures,
 }
 
 struct PlayFun {
-  PlayFun() : watermark(0), log(NULL), rc("playfun") {
+  PlayFun() : watermark(0), log(NULL), rc("playfun"), nfutures_(NFUTURES) {
     map<string, string> config = Util::ReadFileToMap("config.txt");
     if (config.empty()) {
       fprintf(stderr, "You need a file called config.txt; please "
@@ -189,28 +191,39 @@ struct PlayFun {
     // For 64-bit machines with loads of ram
     // Emulator::ResetCache(100000, 10000);
     // For modest systems
-    Emulator::ResetCache(10000, 1000);
+    Emulator::ResetCache(100000, 10000);
 
-    motifvec = motifs->AllMotifs();
+  motifvec = motifs->AllMotifs();
+
+    // Initialize dynamic futures target within bounds.
+    if (nfutures_ < MIN_FUTURES) nfutures_ = MIN_FUTURES;
+    if (nfutures_ > MAX_FUTURES) nfutures_ = MAX_FUTURES;
+
+    // Attempt to resume from a saved state file.
+    bool resumed = LoadStateFile();
 
     // PERF basis?
 
-    solution = SimpleFM2::ReadInputs(moviename);
+    if (!resumed) {
+      solution = SimpleFM2::ReadInputs(moviename);
 
-    size_t start = 0;
-    bool saw_input = false;
-    while (start < solution.size()) {
-      Commit(solution[start], "warmup");
-      watermark++;
-      saw_input = saw_input || solution[start] != 0;
-      if (start > FASTFORWARD && saw_input) break;
-      start++;
+      size_t start = 0;
+      bool saw_input = false;
+      while (start < solution.size()) {
+        Commit(solution[start], "warmup");
+        watermark++;
+        saw_input = saw_input || solution[start] != 0;
+        if (start > FASTFORWARD && saw_input) break;
+        start++;
+      }
+
+      CHECK(start > 0 && "Currently, there needs to be at least "
+        "one observation to score.");
+
+      printf("Skipped %ld frames until first keypress/ffwd.\n", start);
+    } else {
+      printf("Resumed from checkpoint state file.\n");
     }
-
-    CHECK(start > 0 && "Currently, there needs to be at least "
-	  "one observation to score.");
-
-    printf("Skipped %ld frames until first keypress/ffwd.\n", start);
   }
 
   // PERF. Shouldn't really save every memory, but
@@ -241,30 +254,38 @@ struct PlayFun {
 
   // Number of real futures to push forward.
   // XXX the more the merrier! Made this small to test backtracking.
-  static const int NFUTURES = 40;
+  static const int NFUTURES = 200;
 
   // Number of futures that should be generated from weighted
   // motifs as opposed to totally random.
-  static const int NWEIGHTEDFUTURES = 35;
+  static const int NWEIGHTEDFUTURES = 175;
 
   // Drop this many of the worst futures and replace them with
   // totally new futures.
-  static const int DROPFUTURES = 5;
+  static const int DROPFUTURES = 25;
   // Drop this many of the worst futures and replace them with
   // variants on the best future.
-  static const int MUTATEFUTURES = 7;
+  static const int MUTATEFUTURES = 35;
 
   // Number of inputs in each future.
-  static const int MINFUTURELENGTH = 50;
-  static const int MAXFUTURELENGTH = 800;
+  static const int MINFUTURELENGTH = 60;
+  static const int MAXFUTURELENGTH = 1200;
+  // Limit how many candidate nexts we evaluate per round. We prioritize
+  // nexts derived from futures' heads and sample the rest from backfill.
+  static const int MAX_NEXTS = 100;
+  // Maintain at least this many nexts per round after subsampling.
+  static const int MIN_NEXTS = 40;
+  // Bounds for dynamic number of futures maintained.
+  static const int MIN_FUTURES = 80;
+  static const int MAX_FUTURES = 400;
 
   static const bool TRY_BACKTRACK = true;
   // Make a checkpoint this often (number of inputs).
-  static const int CHECKPOINT_EVERY = 100;
+  static const int CHECKPOINT_EVERY = 20;
   // In rounds, not inputs.
-  static const int TRY_BACKTRACK_EVERY = 18;
+  static const int TRY_BACKTRACK_EVERY = 36;
   // In inputs.
-  static const int MIN_BACKTRACK_DISTANCE = 300;
+  static const int MIN_BACKTRACK_DISTANCE = 120;
 
   // Observe the memory (for calibrating objectives and drawing
   // SVG) this often (number of inputs).
@@ -281,6 +302,8 @@ struct PlayFun {
       vector<uint8> savestate;
       Emulator::SaveUncompressed(&savestate);
       checkpoints.push_back(Checkpoint(savestate, movie.size()));
+      // Persist full state on every checkpoint.
+      SaveStateFile();
     }
 
     // PERF: This is very slow...
@@ -318,9 +341,10 @@ struct PlayFun {
     double integral = ScoreIntegral(base_state, future.inputs, &future_memory);
 
     *integral_score = integral / future.inputs.size();
-    *positive_scores = objectives->WeightedLess(base_memory, future_memory);
-    // Note negation; WeightedLess always returns non-negative score.
-    *negative_scores = -objectives->WeightedLess(future_memory, base_memory);
+    double pos = 0.0, neg = 0.0;
+    objectives->DeltaMagnitude(base_memory, future_memory, &pos, &neg);
+    *positive_scores = pos;
+    *negative_scores = neg;
   }
 
   #if MARIONET
@@ -671,11 +695,13 @@ struct PlayFun {
   static void ReverseRange(vector<uint8> *v, int start, int len) {
     CHECK(start >= 0);
     CHECK((start + len) <= v->size());
-    vector<uint8> vnew = *v;
-    for (int i = 0; i < len; i++) {
-      vnew[i] = (*v)[(start + len - 1) - i];
+    int i = start, j = start + len - 1;
+    while (i < j) {
+      uint8 tmp = (*v)[i];
+      (*v)[i] = (*v)[j];
+      (*v)[j] = tmp;
+      i++; j--;
     }
-    v->swap(vnew);
   }
 
   static void Dualize(vector<uint8> *v, int start, int len) {
@@ -721,7 +747,7 @@ struct PlayFun {
       Emulator::CachingStep(inputs[i]);
       vector<uint8> new_memory;
       Emulator::GetMemory(&new_memory);
-      sum += objectives->Evaluate(previous_memory, new_memory);
+  sum += objectives->EvaluateMagnitude(previous_memory, new_memory);
       previous_memory.swap(new_memory);
     }
     if (final_memory != NULL) {
@@ -760,7 +786,7 @@ struct PlayFun {
     // n_minus_e is comparing end and new directly; we don't know a path
     // between those memories so this is the only option.
 
-    double n_minus_e = objectives->Evaluate(end_memory, new_memory);
+  double n_minus_e = objectives->EvaluateMagnitude(end_memory, new_memory);
 
     if (term != NULL) {
       string msg =
@@ -812,9 +838,9 @@ struct PlayFun {
     // start state, an improvement over the end state, and
     // a bigger improvement over the start state than the end
     // state is.
-    double e_minus_s = objectives->Evaluate(start_memory, end_memory);
-    double n_minus_s = objectives->Evaluate(start_memory, new_memory);
-    double n_minus_e = objectives->Evaluate(end_memory, new_memory);
+  double e_minus_s = objectives->EvaluateMagnitude(start_memory, end_memory);
+  double n_minus_s = objectives->EvaluateMagnitude(start_memory, new_memory);
+  double n_minus_e = objectives->EvaluateMagnitude(end_memory, new_memory);
 
     if (term != NULL) {
       string msg =
@@ -883,7 +909,7 @@ struct PlayFun {
     Emulator::SaveUncompressed(&new_state);
 
     // Used to be BuggyEvaluate = WeightedLess? XXX
-    *immediate_score = objectives->Evaluate(current_memory, new_memory);
+  *immediate_score = objectives->EvaluateMagnitude(current_memory, new_memory);
 
     // PERF unused except for drawing
     // XXX probably shouldn't do this since it depends on local
@@ -940,16 +966,10 @@ struct PlayFun {
       // probably dominates, here, so maybe positive_scores is a
       // good tie-breaker?
 
-      // Based on the idea that BuggyEvaluate only used the
-      // positive_scores component. This 'next' doesn't have
-      // to take the future if it has low score, so don't penalize
-      // it when some futures are bad.
-      double future_score = positive_scores;
-      // Probably the most useful thing is the score of the longest
-      // prefix with positive integral? Because we can start doing
-      // the future until that point. This assumes we take the whole
-      // future if it's good.
-      if (integral_score > 0) future_score += integral_score;
+  // Include both positive and negative components, and the full
+  // integral (even when negative). This aligns selection with the
+  // pruning metric used for futures themselves.
+  double future_score = positive_scores + negative_scores + integral_score;
 
       *futures_score += future_score;
 
@@ -972,14 +992,15 @@ struct PlayFun {
 		    vector<uint8> *current_state,
 		    const vector<uint8> &current_memory,
 		    vector<double> *futuretotals,
-		    int *best_next_idx) {
+        int *best_next_idx,
+        double *out_best_score) {
     uint64 start_time = time(NULL);
     fprintf(stderr, "Parallel step with %d nexts, %d futures.\n",
 	    nexts.size(), futures.size());
     CHECK(nexts.size() > 0);
     *best_next_idx = 0;
 
-    double best_score = 0.0;
+  double best_score = 0.0;
     Scoredist distribution(movie.size());
 
 #if MARIONET
@@ -1007,8 +1028,8 @@ struct PlayFun {
     for (int i = 0; i < work.size(); i++) {
       const PlayFunResponse &res = work[i].res;
       for (int f = 0; f < res.futurescores_size(); f++) {
-	CHECK(f <= futuretotals->size());
-	(*futuretotals)[f] += res.futurescores(f);
+    CHECK(f < futuretotals->size());
+    (*futuretotals)[f] += res.futurescores(f);
       }
 
       const double score = res.immediate_score() + res.futures_score();
@@ -1027,43 +1048,43 @@ struct PlayFun {
     }
 
 #else
-    // Local version.
-    for (int i = 0; i < nexts.size(); i++) {
-      double immediate_score, best_future_score, worst_future_score,
-	futures_score;
-      vector<double> futurescores(NFUTURES, 0.0);
-      InnerLoop(nexts[i],
-		futures,
-		current_state,
-		&immediate_score,
-		&best_future_score,
-		&worst_future_score,
-		&futures_score,
-		&futurescores);
+    // Local version: parallelize across nexts when available.
+    struct LocalRes { double immed, futsum, worst; vector<double> futscores; };
+    vector<LocalRes> local(nexts.size());
 
-      for (int f = 0; f < futurescores.size(); f++) {
-	(*futuretotals)[f] += futurescores[f];
+    #pragma omp parallel for schedule(dynamic) if(nexts.size() > 1)
+    for (int i = 0; i < (int)nexts.size(); i++) {
+      double immediate_score = 0.0, best_future_score = 0.0, worst_future_score = 0.0,
+             futures_score = 0.0;
+      vector<double> futurescores(futures.size(), 0.0);
+      // Use a thread-local copy of current_state; InnerLoop loads it as needed.
+      vector<uint8> tl_state = *current_state;
+      InnerLoop(nexts[i], futures, &tl_state,
+                &immediate_score, &best_future_score, &worst_future_score,
+                &futures_score, &futurescores);
+      local[i].immed = immediate_score;
+      local[i].futsum = futures_score;
+      local[i].worst = worst_future_score;
+      local[i].futscores.swap(futurescores);
+    }
+
+    for (int i = 0; i < (int)local.size(); i++) {
+      for (int f = 0; f < (int)local[i].futscores.size(); f++) {
+        (*futuretotals)[f] += local[i].futscores[f];
       }
-
-      double score = immediate_score + futures_score;
-
-      distribution.immediates.push_back(immediate_score);
-      distribution.positives.push_back(futures_score);
-      distribution.negatives.push_back(worst_future_score);
-      // XXX norm score is disabled because it can't be
-      // computed in a distributed fashion.
+      double score = local[i].immed + local[i].futsum;
+      distribution.immediates.push_back(local[i].immed);
+      distribution.positives.push_back(local[i].futsum);
+      distribution.negatives.push_back(local[i].worst);
       distribution.norms.push_back(0);
-
-      if (score > best_score) {
-	best_score = score;
-	*best_next_idx = i;
-      }
+      if (score > best_score) { best_score = score; *best_next_idx = i; }
     }
 #endif
     distribution.chosen_idx = *best_next_idx;
     distributions.push_back(distribution);
 
-    uint64 end_time = time(NULL);
+  if (out_best_score) *out_best_score = best_score;
+  uint64 end_time = time(NULL);
     fprintf(stderr, "Parallel step took %d seconds.\n",
 	    (int)(end_time - start_time));
   }
@@ -1081,7 +1102,7 @@ struct PlayFun {
     fprintf(stderr, "there are %d futures, %d cur weighted, %d need\n",
 	    futures->size(), num_currently_weighted, num_to_weight);
     #endif
-    while (futures->size() < NFUTURES) {
+  while ((int)futures->size() < nfutures_) {
       // Keep the desired length around so that we only
       // resize the future if we drop it. Randomize between
       // MIN and MAX future lengths.
@@ -1100,7 +1121,7 @@ struct PlayFun {
 
     // Make sure we have enough futures with enough data in.
     // PERF: Should avoid creating exact duplicate futures.
-    for (int i = 0; i < NFUTURES; i++) {
+  for (int i = 0; i < nfutures_ && i < futures->size(); i++) {
       while ((*futures)[i].inputs.size() <
 	     (*futures)[i].desired_length) {
 	const vector<uint8> &m =
@@ -1155,13 +1176,13 @@ struct PlayFun {
   void TakeBestAmong(const vector< vector<uint8> > &nexts,
 		     const vector<string> &nextplanations,
 		     vector<Future> *futures,
-		     bool chopfutures) {
+       bool chopfutures,
+       double *out_best_score) {
     vector<uint8> current_state;
     vector<uint8> current_memory;
 
-    if (futures->size() != NFUTURES) {
-      fprintf(stderr, "?? Expected futures to have size %d but "
-	      "it has %d.\n", NFUTURES, futures->size());
+    if ((int)futures->size() != nfutures_) {
+      fprintf(stderr, "Note: futures target %d but current %d.\n", nfutures_, (int)futures->size());
     }
 
     // Save our current state so we can try many different branches.
@@ -1176,9 +1197,31 @@ struct PlayFun {
     ParallelStep(nexts, *futures,
 		 &current_state, current_memory,
 		 &futuretotals,
-		 &best_next_idx);
+		 &best_next_idx,
+		 out_best_score);
     CHECK(best_next_idx >= 0);
     CHECK(best_next_idx < nexts.size());
+
+    // Adapt future lengths: when a future performs well overall,
+    // increase its desired length; otherwise, shorten it. This lets
+    // us have more, shorter futures when things look bad, and fewer,
+    // longer futures when the outlook is good.
+    for (int i = 0; i < futures->size(); i++) {
+      int cur = (*futures)[i].desired_length;
+      // Scale step ~10% of current length, min 1.
+      int step = cur / 10; if (step < 1) step = 1;
+      if (futuretotals[i] > 0) cur = min(MAXFUTURELENGTH, cur + step);
+      else cur = max(MINFUTURELENGTH, cur - step);
+      (*futures)[i].desired_length = cur;
+    }
+
+    // Adjust number of futures based on fraction of positive totals.
+    int positives = 0;
+    for (int i = 0; i < futuretotals.size(); i++) if (futuretotals[i] > 0) positives++;
+    double frac_pos = futuretotals.empty() ? 0.0 : (double)positives / (double)futuretotals.size();
+    int delta = std::max(1, nfutures_ / 20); // 5% step
+    if (frac_pos < 0.4 && nfutures_ < MAX_FUTURES) nfutures_ = std::min(MAX_FUTURES, nfutures_ + delta);
+    else if (frac_pos > 0.6 && nfutures_ > MIN_FUTURES) nfutures_ = std::max(MIN_FUTURES, nfutures_ - delta);
 
     if (chopfutures) {
       // fprintf(stderr, "Chop futures.\n");
@@ -1211,10 +1254,10 @@ struct PlayFun {
       double worst_total = futuretotals[0];
       int worst_idx = 0;
       for (int i = 1; i < futures->size(); i++) {
-	if (worst_total < futuretotals[i]) {
-	  worst_total = futuretotals[i];
-	  worst_idx = i;
-	}
+  if (futuretotals[i] < worst_total) {
+    worst_total = futuretotals[i];
+    worst_idx = i;
+  }
       }
 
       // Delete it by swapping.
@@ -1242,6 +1285,10 @@ struct PlayFun {
 
     for (int t = 0; t < MUTATEFUTURES; t++) {
       futures->push_back(MutateFuture((*futures)[best_future_idx]));
+    }
+
+    if ((int)futures->size() > nfutures_) {
+      futures->resize(nfutures_);
     }
 
     // If in single mode, this is probably cached, but with
@@ -1342,7 +1389,8 @@ struct PlayFun {
     int rounds_until_backtrack = TRY_BACKTRACK_EVERY;
     int64 iters = 0;
 
-    PopulateFutures(&futures);
+  PopulateFutures(&futures);
+  int low_rounds = 0;  // consecutive low-score rounds
     for (;; iters++) {
 
       // XXX TODO this probably gets confused by backtracking.
@@ -1351,8 +1399,21 @@ struct PlayFun {
       vector< vector<uint8> > nexts;
       vector<string> nextplanations;
       MakeNexts(futures, &nexts, &nextplanations);
+      // Subsample nexts to keep evaluation tractable. Target based on nfutures_.
+      int before = nexts.size();
+      int target_nexts = std::min(MAX_NEXTS, std::max(MIN_NEXTS, nfutures_));
+      SubsampleNexts(&nexts, &nextplanations, target_nexts);
+      if (nexts.size() != before) {
+        fprintf(stderr, "Subsampled nexts %d -> %d (target %d)\n", before, (int)nexts.size(), target_nexts);
+      }
 
-      TakeBestAmong(nexts, nextplanations, &futures, true);
+  double round_best = 0.0;
+  TakeBestAmong(nexts, nextplanations, &futures, true, &round_best);
+  // Log dynamic futures and average desired length.
+  double avg_len = 0.0;
+  for (int i = 0; i < futures.size(); i++) avg_len += futures[i].desired_length;
+  if (!futures.empty()) avg_len /= futures.size();
+  fprintf(stderr, "Futures: %d  Avg desired_length: %.1f\n", (int)futures.size(), avg_len);
 
       fprintf(stderr, "%d rounds, "
 	      ANSI_WHITE "%d inputs" ANSI_RESET ". backtrack in %d. "
@@ -1364,6 +1425,15 @@ struct PlayFun {
 	j--;
       }
       fprintf(stderr, "...\n");
+
+      // Early backtrack if we seem stuck (no good options) for a while.
+      if (round_best < 0.0) low_rounds++; else low_rounds = 0;
+      int stuck_threshold_rounds = max(1, TRY_BACKTRACK_EVERY / 2);
+      if (low_rounds >= stuck_threshold_rounds) {
+        fprintf(stderr, ANSI_YELLOW "Stuck detection: forcing backtrack consideration." ANSI_RESET "\n");
+        rounds_until_backtrack = 0;
+        low_rounds = 0;
+      }
 
       MaybeBacktrack(iters, &rounds_until_backtrack, &futures);
 
@@ -1398,7 +1468,7 @@ struct PlayFun {
 
     // There may be duplicates (typical, in fact). Insert motifs
     // as long as we can.
-    while (todo.size() < NFUTURES) {
+  while ((int)todo.size() < std::max(nfutures_, MAX_NEXTS)) {
       const vector<uint8> *motif = motifs->RandomWeightedMotifNotIn(todo);
       if (motif == NULL) {
 	fprintf(stderr, "No more motifs (have %d todo).\n", todo.size());
@@ -1418,6 +1488,52 @@ struct PlayFun {
     }
   }
 
+  // Prefer futures-derived nexts, then sample remainder from backfill.
+  void SubsampleNexts(vector< vector<uint8> > *nexts,
+                      vector<string> *nextplanations,
+                      int target) {
+    if ((int)nexts->size() <= target) return;
+    vector<int> fut_idx, back_idx;
+    fut_idx.reserve(nexts->size());
+    back_idx.reserve(nexts->size());
+    for (int i = 0; i < nextplanations->size(); i++) {
+      if ((*nextplanations)[i].size() >= 4 &&
+          (*nextplanations)[i].substr(0, 4) == "ftr-") fut_idx.push_back(i);
+      else back_idx.push_back(i);
+    }
+    // Shuffle indices using rc for randomness (Fisher-Yates via Swap loop).
+    auto shuffle_idx = [this](vector<int> *v) {
+      for (int i = 0; i < v->size(); i++) {
+        int j = (int)(RandomDouble(&rc) * v->size());
+        if (j < 0) j = 0;
+        if (j >= v->size()) j = v->size() - 1;
+        if (i != j) std::swap((*v)[i], (*v)[j]);
+      }
+    };
+    shuffle_idx(&fut_idx);
+    shuffle_idx(&back_idx);
+
+  int take_fut = std::min((int)fut_idx.size(), (target + 1) / 2);
+    vector<int> chosen;
+    chosen.reserve(target);
+    for (int i = 0; i < take_fut; i++) chosen.push_back(fut_idx[i]);
+    int remaining = target - chosen.size();
+    for (int i = 0; i < back_idx.size() && remaining > 0; i++, remaining--) {
+      chosen.push_back(back_idx[i]);
+    }
+    // If still not enough (e.g., few backfills), pull more futures.
+    for (int i = take_fut; remaining > 0 && i < fut_idx.size(); i++, remaining--) {
+      chosen.push_back(fut_idx[i]);
+    }
+    // Rebuild vectors in chosen order.
+    vector< vector<uint8> > nn;
+    vector<string> np;
+    nn.reserve(chosen.size()); np.reserve(chosen.size());
+    for (int idx : chosen) { nn.push_back((*nexts)[idx]); np.push_back((*nextplanations)[idx]); }
+    nexts->swap(nn);
+    nextplanations->swap(np);
+  }
+
   void TryImprove(Checkpoint *start,
 		  const vector<uint8> &improveme,
 		  const vector<uint8> &current_state,
@@ -1434,7 +1550,7 @@ struct PlayFun {
       ScoreIntegral(&start->save, improveme, NULL);
 
     fprintf(log, "<li>Trying to improve frames %d&ndash;%d, %f</li>\n",
-	    &start->movenum, movie.size(), current_integral);
+      start->movenum, (int)movie.size(), current_integral);
 
     static const int MAXBEST = 10;
 
@@ -1810,6 +1926,132 @@ struct PlayFun {
   Motifs *motifs;
   vector< vector<uint8> > motifvec;
   string game;
+
+ private:
+  // Dynamic futures count.
+  int nfutures_;
+  // ---- Persistent state snapshotting ----
+  static inline void AppendU32(vector<uint8> *out, uint32_t v) {
+    out->push_back(v & 0xFF);
+    out->push_back((v >> 8) & 0xFF);
+    out->push_back((v >> 16) & 0xFF);
+    out->push_back((v >> 24) & 0xFF);
+  }
+  static inline void AppendI32(vector<uint8> *out, int32_t v) {
+    AppendU32(out, (uint32_t)v);
+  }
+  static inline bool ReadU32(const vector<uint8> &in, size_t *p, uint32_t *v) {
+    if (*p + 4 > in.size()) return false;
+    *v = (uint32_t)in[*p] |
+         ((uint32_t)in[*p + 1] << 8) |
+         ((uint32_t)in[*p + 2] << 16) |
+         ((uint32_t)in[*p + 3] << 24);
+    *p += 4; return true;
+  }
+  static inline bool ReadI32(const vector<uint8> &in, size_t *p, int32_t *v) {
+    uint32_t u; if (!ReadU32(in, p, &u)) return false; *v = (int32_t)u; return true;
+  }
+  static inline void AppendBytes(vector<uint8> *out, const vector<uint8> &b) {
+    AppendU32(out, (uint32_t)b.size());
+    out->insert(out->end(), b.begin(), b.end());
+  }
+  static inline bool ReadBytes(const vector<uint8> &in, size_t *p, vector<uint8> *b) {
+    uint32_t n; if (!ReadU32(in, p, &n)) return false;
+    if (*p + n > in.size()) return false;
+    b->assign(in.begin() + *p, in.begin() + *p + n);
+    *p += n; return true;
+  }
+  static inline void AppendString(vector<uint8> *out, const string &s) {
+    AppendU32(out, (uint32_t)s.size());
+    out->insert(out->end(), s.begin(), s.end());
+  }
+  static inline bool ReadString(const vector<uint8> &in, size_t *p, string *s) {
+    uint32_t n; if (!ReadU32(in, p, &n)) return false;
+    if (*p + n > in.size()) return false;
+    s->assign((const char*)&in[*p], n);
+    *p += n; return true;
+  }
+
+  void SaveStateFile() {
+    if (checkpoints.empty()) return;
+    const Checkpoint &cp = checkpoints.back();
+    vector<uint8> out;
+    // Magic
+    out.push_back('P'); out.push_back('F'); out.push_back('S'); out.push_back('T');
+    AppendU32(&out, 1); // version
+    AppendString(&out, game);
+    AppendI32(&out, watermark);
+    // Movie and subtitles
+    AppendBytes(&out, movie);
+    AppendU32(&out, (uint32_t)subtitles.size());
+    for (int i = 0; i < subtitles.size(); i++) AppendString(&out, subtitles[i]);
+    // Memories
+    AppendU32(&out, (uint32_t)memories.size());
+    for (int i = 0; i < memories.size(); i++) AppendBytes(&out, memories[i]);
+    // Latest checkpoint
+    AppendI32(&out, cp.movenum);
+    AppendBytes(&out, cp.save);
+    // Motif weights
+    vector< vector<uint8> > all = motifs->AllMotifs();
+    AppendU32(&out, (uint32_t)all.size());
+    for (int i = 0; i < all.size(); i++) {
+      double *w = motifs->GetWeightPtr(all[i]);
+      double ww = (w != NULL) ? *w : 0.0;
+      // Serialize double as 8 bytes
+      union { double d; uint8 b[8]; } u; u.d = ww;
+      for (int k = 0; k < 8; k++) out.push_back(u.b[k]);
+      AppendBytes(&out, all[i]);
+    }
+    // RNG state
+    vector<uint8> rng;
+    rc.GetState(&rng);
+    AppendBytes(&out, rng);
+
+    const string fname = game + ".pfstate";
+    Util::WriteFileBytes(fname, out);
+    fprintf(stderr, "Saved checkpoint state to %s (%zu bytes)\n", fname.c_str(), out.size());
+  }
+
+  bool LoadStateFile() {
+    const string fname = game + ".pfstate";
+    if (!Util::ExistsFile(fname)) return false;
+    vector<uint8> in = Util::ReadFileBytes(fname);
+    size_t p = 0;
+    if (in.size() < 8) return false;
+    if (!(in[0]=='P' && in[1]=='F' && in[2]=='S' && in[3]=='T')) return false;
+    p = 4;
+    uint32_t ver = 0; if (!ReadU32(in, &p, &ver)) return false;
+    if (ver != 1) { fprintf(stderr, "Unknown pfstate version %u\n", ver); return false; }
+    string g; if (!ReadString(in, &p, &g)) return false;
+    if (g != game) { fprintf(stderr, "State file game mismatch: %s vs %s\n", g.c_str(), game.c_str()); return false; }
+    int32_t wm = 0; if (!ReadI32(in, &p, &wm)) return false; watermark = wm;
+    if (!ReadBytes(in, &p, &movie)) return false;
+    uint32_t nsubs = 0; if (!ReadU32(in, &p, &nsubs)) return false;
+    subtitles.clear(); subtitles.reserve(nsubs);
+    for (uint32_t i = 0; i < nsubs; i++) { string s; if (!ReadString(in, &p, &s)) return false; subtitles.push_back(s); }
+    uint32_t nmem = 0; if (!ReadU32(in, &p, &nmem)) return false;
+    memories.clear(); memories.resize(nmem);
+    for (uint32_t i = 0; i < nmem; i++) if (!ReadBytes(in, &p, &memories[i])) return false;
+    int32_t movenum = 0; if (!ReadI32(in, &p, &movenum)) return false;
+    vector<uint8> save; if (!ReadBytes(in, &p, &save)) return false;
+    checkpoints.clear(); checkpoints.push_back(Checkpoint(save, movenum));
+    // Restore emulator to that checkpoint.
+    Emulator::LoadUncompressed(&checkpoints.back().save);
+    // Rebuild objective observations from saved memories.
+    for (int i = 0; i < memories.size(); i++) objectives->Observe(memories[i]);
+    // Restore motif weights
+    uint32_t nmot = 0; if (!ReadU32(in, &p, &nmot)) return false;
+    for (uint32_t i = 0; i < nmot; i++) {
+      if (p + 8 > in.size()) return false; union { double d; uint8 b[8]; } u; for (int k=0;k<8;k++) u.b[k]=in[p++];
+      vector<uint8> inputs; if (!ReadBytes(in, &p, &inputs)) return false;
+      double *w = motifs->GetWeightPtr(inputs);
+      if (w) *w = u.d;
+    }
+    // RNG
+    vector<uint8> rng; if (!ReadBytes(in, &p, &rng)) return false;
+    (void)rc.SetState(rng);
+    return true;
+  }
 };
 
 /**

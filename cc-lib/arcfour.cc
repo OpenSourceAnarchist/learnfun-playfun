@@ -55,4 +55,20 @@ void ArcFour::Discard(int n) {
   while (n--) (void)Byte();
 }
 
+void ArcFour::GetState(vector<uint8> *state) const {
+  state->clear();
+  state->reserve(2 + 256);
+  state->push_back(ii);
+  state->push_back(jj);
+  for (int i = 0; i < 256; i++) state->push_back(ss[i]);
+}
+
+bool ArcFour::SetState(const vector<uint8> &state) {
+  if (state.size() != 2 + 256) return false;
+  ii = state[0];
+  jj = state[1];
+  for (int i = 0; i < 256; i++) ss[i] = state[2 + i];
+  return true;
+}
+
 
