@@ -38,6 +38,8 @@
 #  include <ctype.h>
    /* directory stuff */
 #  include <dirent.h>
+  /* time */
+#  include <ctime>
 #endif
 
 
