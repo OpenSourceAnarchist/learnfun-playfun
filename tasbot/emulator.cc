@@ -326,10 +326,10 @@ bool Emulator::Initialize(const string &romfile) {
 
 
   {
-    extern int input_display, movieSubtitles;
+    extern int input_display;
+    extern bool movieSubtitles;
     input_display = 0;
-    extern int movieSubtitles;
-    movieSubtitles = 0;
+    movieSubtitles = false;
   }
 
   // Load the game.

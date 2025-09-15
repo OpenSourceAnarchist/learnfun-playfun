@@ -5,6 +5,7 @@
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <functional>
 
 #if 0 // not needed with TDM  - tom7 11 Oct 2015
 
