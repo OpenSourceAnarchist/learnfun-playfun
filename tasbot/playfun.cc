@@ -1007,12 +1007,15 @@ struct PlayFun {
 
     for (int i = 0; i < work.size(); i++) {
       const PlayFunResponse &res = work[i].res;
+      double futures_sum = 0.0;
       for (int f = 0; f < res.futurescores_size(); f++) {
-	CHECK(f <= futuretotals->size());
-	(*futuretotals)[f] += res.futurescores(f);
+        CHECK(f <= futuretotals->size());
+          (*futuretotals)[f] += res.futurescores(f);
+          futures_sum += res.futurescores(f);
       }
 
-      const double score = res.immediate_score() + res.futures_score();
+      // Use immediate score plus sum of full future totals for ranking.
+      const double score = res.immediate_score() + futures_sum;
 
       distribution.immediates.push_back(res.immediate_score());
       distribution.positives.push_back(res.futures_score());
@@ -1041,12 +1044,14 @@ struct PlayFun {
 		&worst_future_score,
 		&futures_score,
 		&futurescores);
-
+        
+      double futures_sum = 0.0;
       for (int f = 0; f < futurescores.size(); f++) {
-	(*futuretotals)[f] += futurescores[f];
+          (*futuretotals)[f] += futurescores[f];
+          futures_sum += futurescores[f];
       }
-
-      double score = immediate_score + futures_score;
+      
+      double score = immediate_score + futures_sum;
 
       distribution.immediates.push_back(immediate_score);
       distribution.positives.push_back(futures_score);
@@ -1066,7 +1071,7 @@ struct PlayFun {
 
     uint64 end_time = time(NULL);
     fprintf(stderr, "Parallel step took %d seconds.\n",
-	    (int)(end_time - start_time));
+	    (uint64_t)(end_time - start_time));
   }
 
   void PopulateFutures(vector<Future> *futures) {
@@ -1212,10 +1217,10 @@ struct PlayFun {
       double worst_total = futuretotals[0];
       int worst_idx = 0;
       for (int i = 1; i < futures->size(); i++) {
-	if (worst_total < futuretotals[i]) {
-	  worst_total = futuretotals[i];
-	  worst_idx = i;
-	}
+        if (futuretotals[i] < worst_total) {
+          worst_total = futuretotals[i];
+          worst_idx = i;
+        }
       }
 
       // Delete it by swapping.

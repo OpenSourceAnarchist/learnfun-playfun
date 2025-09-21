@@ -8,11 +8,26 @@ AC_INIT([playfun], [1.0], [https://github.com/OpenSourceAnarchist/learnfun-playf
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AC_PROG_CXX
+AC_PROG_CC
 AM_PROG_AR
 LT_INIT
 AM_PROG_CC_C_O
-# We require C++11
-AX_CXX_COMPILE_STDCXX_11(,[mandatory])
+
+# We require C++23
+AX_CXX_COMPILE_STDCXX([23],, [mandatory])
+# We require C23. Check for the flag manually for portability.
+AC_LANG_PUSH([C])
+AX_CHECK_COMPILE_FLAG([-std=c23],
+    [CFLAGS="$CFLAGS -std=c23"],
+    [AX_CHECK_COMPILE_FLAG([-std=gnu23],
+        [CFLAGS="$CFLAGS -std=gnu23"],
+        [AC_MSG_ERROR([A C23-compliant compiler is required.])])
+    ])
+AC_LANG_POP([C])
+
+# Add warning flags for all C and C++ builds
+CFLAGS="$CFLAGS -Wall -Wno-register -Wno-deprecated -Wno-unused-result -Wno-write-strings -fpermissive"
+CXXFLAGS="$CXXFLAGS -Wall -Wno-register -Wno-deprecated -Wno-unused-result -Wno-write-strings"
 
 # Check for an aggressive optimization flag
 AC_ARG_ENABLE([aggressive-opts],
@@ -24,11 +39,13 @@ AC_ARG_ENABLE([aggressive-opts],
             #  -Ofast implies -ffast-math and may change IEEE 754 behavior; use only if acceptable.
             #  -march=native generates code for the local CPU; resulting binaries may not run on older/different CPUs.
             #  -flto requires matching binutils; add to both compile and link flags.
-            cxx_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing -Wno-write-strings -fpermissive -Wno-unused-result -Wno-register -Wno-deprecated"
-            c_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing -Wno-unused-result -Wno-register -Wno-deprecated"
+            cxx_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+            c_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+            ld_aggressive_flags="-Ofast -march=native -flto=auto"
+
             CXXFLAGS="$CXXFLAGS $cxx_aggressive_flags"
             CFLAGS="$CFLAGS $c_aggressive_flags"
-            LDFLAGS="$LDFLAGS -flto=auto"
+            LDFLAGS="$LDFLAGS $ld_aggressive_flags"
         fi
     ]
 )
