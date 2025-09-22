@@ -13,15 +13,15 @@ AM_PROG_AR
 LT_INIT
 AM_PROG_CC_C_O
 
-# We require C++23
-AX_CXX_COMPILE_STDCXX([23],, [mandatory])
-# We require C23. Check for the flag manually for portability.
+# We require C++20
+AX_CXX_COMPILE_STDCXX([20],, [mandatory])
+# We require C18. Check for the flag manually for portability.
 AC_LANG_PUSH([C])
-AX_CHECK_COMPILE_FLAG([-std=c23],
-    [CFLAGS="$CFLAGS -std=c23"],
-    [AX_CHECK_COMPILE_FLAG([-std=gnu23],
-        [CFLAGS="$CFLAGS -std=gnu23"],
-        [AC_MSG_ERROR([A C23-compliant compiler is required.])])
+AX_CHECK_COMPILE_FLAG([-std=c18],
+    [CFLAGS="$CFLAGS -std=c18"],
+    [AX_CHECK_COMPILE_FLAG([-std=gnu18],
+        [CFLAGS="$CFLAGS -std=gnu18"],
+        [AC_MSG_ERROR([A C18-compliant compiler is required.])])
     ])
 AC_LANG_POP([C])
 
@@ -34,6 +34,19 @@ AC_ARG_ENABLE([aggressive-opts],
     [AS_HELP_STRING([--enable-aggressive-opts], [Enable aggressive, performance-focused compiler optimizations (-Ofast, -march=native, LTO, etc.)])],
     [
         if test "x$enableval" = "xyes"; then
+            # Detect compiler family to apply the most effective flags.
+            case "$CXX" in
+            *clang*)
+                compiler_family="clang"
+                ;;
+            *g++*)
+                compiler_family="gcc"
+                ;;
+            *)
+                compiler_family="unknown"
+                ;;
+            esac
+
             # These flags favor maximum runtime performance and may impact portability and floating-point semantics.
             # Notes:
             #  -Ofast implies -ffast-math and may change IEEE 754 behavior; use only if acceptable.
@@ -42,6 +55,17 @@ AC_ARG_ENABLE([aggressive-opts],
             cxx_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
             c_aggressive_flags="-Ofast -march=native -flto=auto -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
             ld_aggressive_flags="-Ofast -march=native -flto=auto"
+            
+            # LTO flags vary between compilers for maximum single-job performance.
+            if test "x$compiler_family" = "xclang"; then
+                cxx_aggressive_flags="-Ofast -march=native -flto=full -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+                c_aggressive_flags="-Ofast -march=native -flto=full -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+                ld_aggressive_flags="-Ofast -march=native -flto=full"
+            else
+                cxx_aggressive_flags="-Ofast -march=native -flto -flto-partition=one -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+                c_aggressive_flags="-Ofast -march=native -flto -flto-partition=one -falign-functions=32 -fomit-frame-pointer -fno-strict-aliasing"
+                ld_aggressive_flags="-Ofast -march=native -flto -flto-partition=one"
+            fi
 
             CXXFLAGS="$CXXFLAGS $cxx_aggressive_flags"
             CFLAGS="$CFLAGS $c_aggressive_flags"
