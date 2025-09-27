@@ -59,13 +59,13 @@ else
     # Enabled: add -Ofast plus additive flags only.
     case "$compiler_family" in
         gcc)
-            CFLAGS="-Ofast -march=native -flto -funroll-loops -ffunction-sections -fdata-sections $CFLAGS"
-            CXXFLAGS="-Ofast -march=native -flto -funroll-loops -ffunction-sections -fdata-sections $CXXFLAGS"
+            CFLAGS="-Ofast -march=native -flto -funroll-loops -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -fipa-pta -fdevirtualize-at-ltrans -frename-registers -fvisibility=hidden $CFLAGS"
+            CXXFLAGS="-Ofast -march=native -flto -funroll-loops -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -fipa-pta -fdevirtualize-at-ltrans -frename-registers -fvisibility=hidden $CXXFLAGS"
             LDFLAGS="-flto -Wl,--gc-sections $LDFLAGS"
             ;;
         clang)
-            CFLAGS="-Ofast -march=native -flto=full -funroll-loops -ffunction-sections -fdata-sections $CFLAGS"
-            CXXFLAGS="-Ofast -march=native -flto=full -funroll-loops -ffunction-sections -fdata-sections $CXXFLAGS"
+            CFLAGS="-Ofast -march=native -flto=full -funroll-loops -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -fvectorize -fvisibility=hidden $CFLAGS"
+            CXXFLAGS="-Ofast -march=native -flto=full -funroll-loops -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -fvectorize -fvisibility=hidden $CXXFLAGS"
             LDFLAGS="-flto=full -Wl,--gc-sections $LDFLAGS"
             ;;
         *)
@@ -93,8 +93,6 @@ else
             [AC_MSG_RESULT([no]); CXXFLAGS="$save_CXXFLAGS"; CFLAGS="$save_CFLAGS"])
     fi
 
-    AX_CHECK_COMPILE_FLAG([-fvisibility=hidden],
-        [CFLAGS="$CFLAGS -fvisibility=hidden"; CXXFLAGS="$CXXFLAGS -fvisibility=hidden"]) 
 fi
 
 # Dependencies
